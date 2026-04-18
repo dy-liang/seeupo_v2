@@ -12,7 +12,7 @@ trainer:
   experiment_name: "run-appworld-qwen3-14b-linearthink-seeupo-reverse-Bnorm-n8-bz32"
 
   # New: explicit checkpoint save directory (use an absolute path)
-  default_local_dir: /your/path/to/checkpoints/appworld/run-appworld-qwen3-14b-linearthink-seeupo-reverse-Bnorm-n8-bz32
+  default_local_dir: checkpoints/appworld/run-appworld-qwen3-14b-linearthink-seeupo-reverse-Bnorm-n8-bz32
   default_hdfs_dir: null  # Set to null if not using HDFS
 
   # New: checkpoint retention policy
@@ -26,17 +26,17 @@ trainer:
 
 
   val_before_train: False
-  n_gpus_per_node: 8
-  nnodes: 2  # 16 GPUs total with 8 per node
-  save_freq: 3
+  n_gpus_per_node: 4
+  nnodes: 1  # 16 GPUs total with 8 per node
+  save_freq: 200
   test_freq: 5
   total_epochs: 75
   logger:
     - console
     - swanlab
   project_name: beyondagent
-  validation_data_dir: "experiments/exp_default/validation_log"
-  rollout_data_dir: "experiments/exp_default/rollout_log"
+  validation_data_dir: "experiments/exp_default_seeupo/validation_log"
+  rollout_data_dir: "experiments/exp_default_seeupo/rollout_log"
   critic_warmup: 0
   eval_pass_n: 4
 
@@ -65,6 +65,7 @@ algorithm:
 
   # 5. Advantages Normalization
   norm_adv_by_std_in_grpo: False # should not norm, otherwise not converge
+  step_reward_normalization: none # none | qapo
   special_norm: True
 
 
@@ -74,8 +75,8 @@ data:
   max_prompt_length: 13000 # Dataset filtering (verl/utils/dataset/rl_dataset.py); length truncation
   max_response_length: 3000  # Length truncation
   return_raw_chat: True
-  train_files: '//external/appworld/data/train.parquet'
-  val_files: '//external/appworld/data/dev.parquet'
+  train_files: 'external/appworld/data/train.parquet'
+  val_files: 'external/appworld/data/dev.parquet'
   
 actor_rollout_ref:
   actor:
@@ -125,7 +126,7 @@ actor_rollout_ref:
     fsdp_config:
       param_offload: True
   model:
-    path: your/path/to/Qwen3-14B
+    path: Qwen/Qwen3-14B-Instruct
     use_qwen3: True
     use_remove_padding: True
     enable_gradient_checkpointing: True

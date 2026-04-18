@@ -81,6 +81,57 @@ from loguru import logger
 WorkerType = type[Worker]
 
 
+def _get_step_outcome(reward_score: dict) -> float:
+    if "step_outcome" in reward_score:
+        return float(reward_score["step_outcome"])
+
+    if not reward_score.get("active_step", True):
+        return 0.0
+
+    outcome = float(reward_score["outcome"])
+    trajectory_length = max(int(reward_score.get("trajectory_length", 1)), 1)
+    step_reward_normalization = reward_score.get("step_reward_normalization", "none")
+    if step_reward_normalization == "qapo" and outcome > 0:
+        return outcome / trajectory_length
+    return outcome
+
+
+def _get_trajectory_turn_length(traj: CMTLinear) -> int:
+    grouped_steps = getattr(traj, "grouped_steps", None)
+    if grouped_steps is not None:
+        return len(grouped_steps)
+
+    full_context = getattr(traj, "full_context", None)
+    if full_context is not None:
+        return sum(1 for msg in full_context if getattr(msg, "author", None) == "llm")
+
+    return 0
+
+
+def compute_success_trajectory_length_metrics(trajectories: list[CMTLinear]) -> dict[str, float]:
+    success_lengths = [
+        _get_trajectory_turn_length(traj)
+        for traj in trajectories
+        if getattr(getattr(traj, "reward", None), "success_rate", 0.0) > 0
+    ]
+
+    metrics = {
+        "rollout/success_traj_count": len(success_lengths),
+        "rollout/success_traj_len_avg": 0.0,
+        "rollout/success_traj_len_max": 0.0,
+        "rollout/success_traj_len_min": 0.0,
+    }
+    if success_lengths:
+        metrics.update(
+            {
+                "rollout/success_traj_len_avg": float(np.mean(success_lengths)),
+                "rollout/success_traj_len_max": float(np.max(success_lengths)),
+                "rollout/success_traj_len_min": float(np.min(success_lengths)),
+            }
+        )
+    return metrics
+
+
 def parse_reward_from_dataproto(data: DataProto, return_dict=False) -> dict | torch.Tensor:
     """
     Compute reward for a batch of data.
@@ -107,7 +158,7 @@ def parse_reward_from_dataproto(data: DataProto, return_dict=False) -> dict | to
     response_lengths = attention_masks[:, prompt_lengths:].sum(dim=1)  # (bs, )
 
     # Get reward scores
-    reward_scores_list = [item["outcome"] for item in data.non_tensor_batch["reward_scores"]]
+    reward_scores_list = [_get_step_outcome(item) for item in data.non_tensor_batch["reward_scores"]]
     reward_scores = torch.tensor(reward_scores_list, device=reward_tensor.device, dtype=torch.float32)  # (bs, )
 
     # Use advanced indexing to assign rewards
@@ -1425,6 +1476,7 @@ class BeyondAgentRayPPOTrainer:
                             "critic/success_rate": np.mean(success_rate),
                             "critic/real_success_rate": np.mean(trajectories[0].current_batch_success_rate),
                         })
+                        metrics.update(compute_success_trajectory_length_metrics(trajectories))
                         if self.config.algorithm.sequential_update:
                             print(f"gen_batch_output.info init_batch.keys={gen_batch_output[-1].batch.keys()}")
                         else:

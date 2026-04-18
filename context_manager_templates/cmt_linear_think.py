@@ -249,6 +249,26 @@ class LinearThinkCMT(CMTLinear):
         return latest_content
 
 
+    def build_step_reward_scores(self, active_step: bool) -> dict:
+        reward_scores = self.reward.model_dump()
+        trajectory_length = max(len(self.grouped_steps), 1)
+        outcome = float(reward_scores["outcome"])
+        step_reward_normalization = self.config.algorithm.get("step_reward_normalization", "none")
+
+        if not active_step:
+            step_outcome = 0.0
+        elif step_reward_normalization == "qapo" and outcome > 0:
+            step_outcome = outcome / trajectory_length
+        else:
+            step_outcome = outcome
+
+        reward_scores["trajectory_length"] = trajectory_length
+        reward_scores["active_step"] = active_step
+        reward_scores["step_reward_normalization"] = step_reward_normalization
+        reward_scores["step_outcome"] = step_outcome
+        return reward_scores
+
+
     def group_tokenize(self):
         sample_arr = []
         max_num_group = self.config.actor_rollout_ref.rollout.multi_turn.max_sample_per_task
@@ -275,7 +295,7 @@ class LinearThinkCMT(CMTLinear):
                 position_ids=cmt_tokenized["position_ids"],
                 prompt_position_ids=cmt_tokenized["prompt_position_ids"],
                 response_position_ids=cmt_tokenized["response_position_ids"],
-                reward_scores=self.reward.model_dump(), # reward is duplicated in each sample
+                reward_scores=self.build_step_reward_scores(active_step=True),
                 max_prompt_len=self.config.data.max_prompt_length,
                 max_response_len=self.config.data.max_response_length,
                 max_model_len=self.config.data.max_response_length + self.config.data.max_prompt_length,
@@ -290,6 +310,7 @@ class LinearThinkCMT(CMTLinear):
         max_turn = self.config.actor_rollout_ref.rollout.multi_turn.max_steps
         # 这里的for循环应该改成整体轮次循环,然后在超过最大轮次之后, 始终为最后一个ext_steps，但是全部mask掉
         for turn_idx in range(max_turn):
+            active_step = turn_idx < len(self.grouped_steps)
             if turn_idx < len(self.grouped_steps):
                 ext_steps = self.grouped_steps[turn_idx]
                 cmt_tokenized = self.tokenize_steps(ext_steps=ext_steps, debug=True)
@@ -315,7 +336,7 @@ class LinearThinkCMT(CMTLinear):
                 position_ids=cmt_tokenized["position_ids"],
                 prompt_position_ids=cmt_tokenized["prompt_position_ids"],
                 response_position_ids=cmt_tokenized["response_position_ids"],
-                reward_scores=self.reward.model_dump(), # reward is duplicated in each sample
+                reward_scores=self.build_step_reward_scores(active_step=active_step),
                 max_prompt_len=self.config.data.max_prompt_length,
                 max_response_len=self.config.data.max_response_length,
                 max_model_len=self.config.data.max_response_length + self.config.data.max_prompt_length,
@@ -387,6 +408,4 @@ class LinearThinkCMT(CMTLinear):
         cmt_tokenized["response_position_ids"] = response_position_ids
 
         return cmt_tokenized
-
-
 

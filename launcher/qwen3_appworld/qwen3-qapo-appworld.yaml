@@ -9,10 +9,10 @@ defaults:
   - _self_
 
 trainer:
-  experiment_name: "run-appworld-qwen3-14b-linearthink-grpo-n8-bz32"
+  experiment_name: "run-appworld-qwen3-14b-linearthink-qapo-n8-bz32"
 
   # New: explicit checkpoint save directory (use an absolute path)
-  default_local_dir: checkpoints/appworld/run-appworld-qwen3-14b-linearthink-grpo-n8-bz32
+  default_local_dir: checkpoints/appworld/run-appworld-qwen3-14b-linearthink-qapo-n8-bz32
   default_hdfs_dir: null  # Set to null if not using HDFS
 
   # New: checkpoint retention policy
@@ -46,28 +46,27 @@ env_service:
   env_feedin_preference: code
 
 algorithm:
-  # 1. Token-level GRPO
+  # 1. Token-level GRPO with QAPO step reward normalization
   adv_estimator: grpo # grpo gae
   use_kl_in_reward: False
 
   # 2. Not using GSPO sequence loss; comment out loss_mode / loss_agg_mode
-  # loss_mode: gspo 
+  # loss_mode: gspo
   # loss_agg_mode: "seq-mean-token-mean"
-  
+
   # 3. No sequential token update
-  sequential_update: False 
+  sequential_update: False
   update_order: "sequential" # choose from sequential/reverse/random/custom
-  
+
   # 4. No SeeUPO advantage correction
-  adv_updator: None # seeupo or None 
+  adv_updator: None # seeupo or None
   adv_clip_ratio_high: 0.2
   adv_clip_ratio_low: 0.2
 
-  # 5. Advantages Normalization (typical for GRPO baseline)
+  # 5. Advantages Normalization and QAPO reward shaping
   norm_adv_by_std_in_grpo: True
-  step_reward_normalization: none # none | qapo
+  step_reward_normalization: qapo # none | qapo
   # special_norm: True
-
 
 
 data:
@@ -77,7 +76,7 @@ data:
   return_raw_chat: True
   train_files: 'external/appworld/data/train.parquet'
   val_files: 'external/appworld/data/dev.parquet'
-  
+
 actor_rollout_ref:
   actor:
     override_ppo_mini_batch_num: 1
@@ -99,14 +98,14 @@ actor_rollout_ref:
     multi_turn:
       max_steps: 10
       max_sample_per_task: 32
-    debug_llm_io: False 
+    debug_llm_io: False
     max_num_seqs: 48
     n: 8
     name: vllm
     mode: async
     max_env_len: 3000     # Truncate environment feedback
     response_length: 3000 # Serves as max_completion_tokens
-    prompt_length: 13000   
+    prompt_length: 13000
     max_model_len: 16000  # Respect max_model_len; end multi-turn early when appropriate
     temperature: 0.9
     max_env_worker: 128
