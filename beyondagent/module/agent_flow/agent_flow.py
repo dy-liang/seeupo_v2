@@ -138,18 +138,31 @@ class AgentFlow(BaseAgentFlow):
                 break
 
         tmux['step'][thread_index] = -1
-        score = env.evaluate(instance_id, params={"sparse": False})
-        score = score if not isinstance(score, dict) else score['accuracy']
+        score_info = env.evaluate(instance_id, params={"sparse": False, "return_details": True})
+        score = score_info if not isinstance(score_info, dict) else score_info["accuracy"]
+        reward_metadata = {}
+        if isinstance(score_info, dict):
+            reward_metadata = {
+                "num_passes": int(score_info.get("num_passes", 0)),
+                "num_failures": int(score_info.get("num_failures", 0)),
+            }
         if score >= 1:
             if self.config.actor_rollout_ref.rollout.magnify_success:
-                score = 1.0 + score * 0.5
+                success_bonus = 10.0 if self.config.algorithm.adv_estimator == "qapo" else 1.0
+                score = success_bonus + score * 0.5
             success_rate = 1.0
         else:
             if self.config.actor_rollout_ref.rollout.magnify_success:
                 score = 0.0 + score * 0.5
             success_rate = 0.0
 
-        self.cmt.reward = Reward(outcome=score, success_rate=success_rate, madness=self.cmt.compute_madness(), description="Success=1, Failure=0")
+        self.cmt.reward = Reward(
+            outcome=score,
+            success_rate=success_rate,
+            madness=self.cmt.compute_madness(),
+            description="Success=1, Failure=0",
+            metadata=reward_metadata,
+        )
         self.cmt.reward = self.cmt.reward_patch(self.cmt.reward)
         self.cmt.remove_last_context()
 

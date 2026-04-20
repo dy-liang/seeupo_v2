@@ -47,7 +47,7 @@ env_service:
 
 algorithm:
   # 1. GRAE-family algorithms: use grpo
-  adv_estimator: grpo # grpo gae
+  adv_estimator: grpo # grpo qapo gae
   use_kl_in_reward: False
 
   # 2. Sequence-level algorithms: set these; otherwise comment them out
@@ -65,7 +65,7 @@ algorithm:
 
   # 5. Advantages Normalization
   norm_adv_by_std_in_grpo: False # should not norm, otherwise not converge
-  step_reward_normalization: none # none | qapo
+  token_level_adv_beta: 0.0
   special_norm: True
 
 

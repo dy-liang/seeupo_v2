@@ -81,18 +81,32 @@ from loguru import logger
 WorkerType = type[Worker]
 
 
-def _get_step_outcome(reward_score: dict) -> float:
-    if "step_outcome" in reward_score:
-        return float(reward_score["step_outcome"])
+def _get_base_outcome(reward_score: dict) -> float:
+    if not reward_score.get("active_step", True):
+        return 0.0
 
+    return float(reward_score["outcome"])
+
+
+def _get_traj_length_normalized_outcome(reward_score: dict) -> float:
+    if not reward_score.get("active_step", True):
+        return 0.0
+
+    outcome = float(reward_score["outcome"])  # not success_rate
+    success_rate = float(reward_score.get("success_rate", 0.0))
+    trajectory_length = max(int(reward_score.get("trajectory_length", 1)), 1)
+    if success_rate > 0:
+        return outcome / trajectory_length
+    return outcome
+
+def _get_token_length_normalized_outcome(reward_score: dict, response_token_length: float) -> float:
     if not reward_score.get("active_step", True):
         return 0.0
 
     outcome = float(reward_score["outcome"])
-    trajectory_length = max(int(reward_score.get("trajectory_length", 1)), 1)
-    step_reward_normalization = reward_score.get("step_reward_normalization", "none")
-    if step_reward_normalization == "qapo" and outcome > 0:
-        return outcome / trajectory_length
+    response_token_length = max(float(response_token_length), 1.0)
+    if outcome > 0:
+        return outcome / response_token_length
     return outcome
 
 
@@ -108,12 +122,57 @@ def _get_trajectory_turn_length(traj: CMTLinear) -> int:
     return 0
 
 
+def _get_traj_reward_metadata_counts(traj: CMTLinear) -> tuple[int, int]:
+    reward = getattr(traj, "reward", None)
+    metadata = getattr(reward, "metadata", {}) or {}
+    num_passes = int(metadata.get("num_passes", 0))
+    num_failures = int(metadata.get("num_failures", 0))
+    return num_passes, num_failures
+
+
+def _summarize_numeric_series(prefix: str, values: list[int | float]) -> dict[str, float]:
+    metrics = {
+        f"{prefix}_avg": 0.0,
+        f"{prefix}_max": 0.0,
+        f"{prefix}_min": 0.0,
+    }
+    if values:
+        metrics.update(
+            {
+                f"{prefix}_avg": float(np.mean(values)),
+                f"{prefix}_max": float(np.max(values)),
+                f"{prefix}_min": float(np.min(values)),
+            }
+        )
+    return metrics
+
+
 def compute_success_trajectory_length_metrics(trajectories: list[CMTLinear]) -> dict[str, float]:
     success_lengths = [
         _get_trajectory_turn_length(traj)
         for traj in trajectories
         if getattr(getattr(traj, "reward", None), "success_rate", 0.0) > 0
     ]
+    partial_success_lengths = []
+    complete_failure_lengths = []
+    partial_success_num_passes = []
+    complete_success_num_passes = []
+    requirement_counts = []
+
+    for traj in trajectories:
+        reward = getattr(traj, "reward", None)
+        success_rate = getattr(reward, "success_rate", 0.0)
+        num_passes, num_failures = _get_traj_reward_metadata_counts(traj)
+        traj_length = _get_trajectory_turn_length(traj)
+        requirement_counts.append(num_passes + num_failures)
+        if success_rate > 0:
+            complete_success_num_passes.append(num_passes)
+        else:
+            if num_passes > 0:
+                partial_success_num_passes.append(num_passes)
+                partial_success_lengths.append(traj_length)
+            else:
+                complete_failure_lengths.append(traj_length)
 
     metrics = {
         "rollout/success_traj_count": len(success_lengths),
@@ -129,6 +188,21 @@ def compute_success_trajectory_length_metrics(trajectories: list[CMTLinear]) -> 
                 "rollout/success_traj_len_min": float(np.min(success_lengths)),
             }
         )
+    metrics.update(
+        _summarize_numeric_series("rollout/partial_success_traj_num_passes", partial_success_num_passes)
+    )
+    metrics.update(
+        _summarize_numeric_series("rollout/success_traj_num_passes", complete_success_num_passes)
+    )
+    metrics.update(
+        _summarize_numeric_series("rollout/requirement_count", requirement_counts)
+    )
+    metrics.update(
+        _summarize_numeric_series("rollout/partial_success_traj_len", partial_success_lengths)
+    )
+    metrics.update(
+        _summarize_numeric_series("rollout/failure_traj_len", complete_failure_lengths)
+    )
     return metrics
 
 
@@ -158,7 +232,7 @@ def parse_reward_from_dataproto(data: DataProto, return_dict=False) -> dict | to
     response_lengths = attention_masks[:, prompt_lengths:].sum(dim=1)  # (bs, )
 
     # Get reward scores
-    reward_scores_list = [_get_step_outcome(item) for item in data.non_tensor_batch["reward_scores"]]
+    reward_scores_list = [_get_base_outcome(item) for item in data.non_tensor_batch["reward_scores"]]
     reward_scores = torch.tensor(reward_scores_list, device=reward_tensor.device, dtype=torch.float32)  # (bs, )
 
     # Use advanced indexing to assign rewards
@@ -171,6 +245,66 @@ def parse_reward_from_dataproto(data: DataProto, return_dict=False) -> dict | to
         }
     else:
         return reward_tensor
+
+
+def _compute_group_relative_advantages_from_scores(
+    scores: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    special_norm: bool = False,
+    active_mask: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    scores = scores.clone()
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        if active_mask is None:
+            active_mask = torch.ones(bsz, dtype=torch.bool, device=scores.device)
+        else:
+            active_mask = active_mask.to(device=scores.device, dtype=torch.bool)
+
+        for i in range(bsz):
+            if active_mask[i]:
+                id2score[index[i]].append(scores[i])
+
+        for idx, group_scores in id2score.items():
+            if len(group_scores) == 1:
+                id2mean[idx] = torch.tensor(0.0, device=scores.device, dtype=scores.dtype)
+                id2std[idx] = torch.tensor(1.0, device=scores.device, dtype=scores.dtype)
+            elif len(group_scores) > 1:
+                scores_tensor = torch.stack(group_scores)
+                id2mean[idx] = torch.mean(scores_tensor)
+                id2std[idx] = torch.std(scores_tensor)
+            else:
+                raise ValueError(f"no active score in prompt index: {idx}")
+
+        for i in range(bsz):
+            if not active_mask[i]:
+                scores[i] = 0.0
+            elif norm_adv_by_std_in_grpo:
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            else:
+                scores[i] = scores[i] - id2mean[index[i]]
+
+        if special_norm:
+            assert not norm_adv_by_std_in_grpo
+            if torch.any(active_mask):
+                active_scores = scores[active_mask]
+                if torch.std(active_scores) > 1e-6:
+                    active_scores = (active_scores - torch.mean(active_scores)) / torch.std(active_scores)
+                else:
+                    active_scores = active_scores - torch.mean(active_scores)
+                scores[active_mask] = torch.clamp(active_scores, -3, 3)
+            scores[~active_mask] = 0.0
+
+        scores = scores.unsqueeze(-1) * response_mask
+
+    return scores, scores
 
 def union_gen_batch_via_task_id(tasks, batch: DataProto, gen_batch_output: DataProto):
     """
@@ -410,19 +544,30 @@ def compute_advantage(
         response_length = grpo_calculation_mask.size(1)
         # This mask is the one intended for GRPO
         grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]
-        # Call compute_grpo_outcome_advantage with parameters matching its definition
-        # advantages, returns, std_ge1_freq = core_algos.compute_grpo_outcome_advantage(
-        #     token_level_rewards=data.batch["token_level_rewards"],
-        #     response_mask=grpo_calculation_mask,
-        #     index=data.non_tensor_batch["uid"],
-        #     norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-        # )
         advantages, returns = compute_grpo_outcome_advantage_local(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
             special_norm=special_norm,
+            reward_scores=data.non_tensor_batch["reward_scores"],
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.QAPO:
+        raw_response_mask = data.batch["response_mask"]
+        qapo_calculation_mask = raw_response_mask
+        response_length = qapo_calculation_mask.size(1)
+        qapo_calculation_mask = data.batch["loss_mask"][:, -response_length:]
+        response_token_lengths = qapo_calculation_mask.sum(dim=-1).clamp(min=1)
+        advantages, returns = compute_qapo_outcome_advantage(
+            response_mask=qapo_calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            reward_scores=data.non_tensor_batch["reward_scores"],
+            response_token_lengths=response_token_lengths,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            special_norm=special_norm,
+            token_level_adv_beta=config.get("token_level_adv_beta", 0.0) if config is not None else 0.0,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -458,6 +603,7 @@ def compute_grpo_outcome_advantage_local(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     special_norm: bool = False,
+    reward_scores: Optional[np.ndarray] = None,
     config: Optional[AlgoConfig] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -488,43 +634,92 @@ def compute_grpo_outcome_advantage_local(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
-    scores = token_level_rewards.sum(dim=-1)
+    trajectory_scores = token_level_rewards.sum(dim=-1)
 
-    id2score = defaultdict(list)
-    id2mean = {}
-    id2std = {}
+    if reward_scores is None:
+        active_mask = None
+    else:
+        active_mask = torch.tensor(
+            [item.get("active_step", True) for item in reward_scores],
+            device=trajectory_scores.device,
+            dtype=torch.bool,
+        )
 
-    with torch.no_grad():
-        bsz = scores.shape[0]
-        for i in range(bsz):
-            id2score[index[i]].append(scores[i])
-        for idx in id2score:
-            if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
-            elif len(id2score[idx]) > 1:
-                scores_tensor = torch.stack(id2score[idx])
-                id2mean[idx] = torch.mean(scores_tensor)
-                id2std[idx] = torch.std(scores_tensor)
-            else:
-                raise ValueError(f"no score in prompt index: {idx}")
-        for i in range(bsz):
-            if norm_adv_by_std_in_grpo:
-                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
-            else:
-                scores[i] = scores[i] - id2mean[index[i]]
-        if special_norm:
-            # pass
-            assert not norm_adv_by_std_in_grpo
-            if torch.std(scores) > 1e-6:
-                scores = (scores - torch.mean(scores)) / (torch.std(scores))
-            else:
-                scores = (scores - torch.mean(scores))
-            scores = torch.clamp(scores, -3, 3)
-        scores = scores.unsqueeze(-1) * response_mask
+    trajectory_advantages, trajectory_returns = _compute_group_relative_advantages_from_scores(
+        scores=trajectory_scores,
+        response_mask=response_mask,
+        index=index,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        special_norm=special_norm,
+        active_mask=active_mask,
+    )
+
+    return trajectory_advantages, trajectory_returns
 
 
-    return scores, scores
+def compute_qapo_outcome_advantage(
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    reward_scores: np.ndarray,
+    response_token_lengths: torch.Tensor,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    special_norm: bool = False,
+    token_level_adv_beta: float = 0.0,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device = response_mask.device
+    dtype = torch.float32
+
+    active_mask = torch.tensor(
+        [item.get("active_step", True) for item in reward_scores],
+        device=device,
+        dtype=torch.bool,
+    )
+
+    trajectory_scores = torch.tensor(
+        [_get_traj_length_normalized_outcome(item) for item in reward_scores],
+        device=device,
+        dtype=dtype,
+    )
+    trajectory_advantages, trajectory_returns = _compute_group_relative_advantages_from_scores(
+        scores=trajectory_scores,
+        response_mask=response_mask,
+        index=index,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        special_norm=special_norm,
+        active_mask=active_mask,
+    )
+
+    if token_level_adv_beta == 0.0:
+        return trajectory_advantages, trajectory_returns
+
+    token_level_scores = torch.tensor(
+        [
+            _get_token_length_normalized_outcome(
+                reward_score=item,
+                response_token_length=response_token_lengths[i].item(),
+            )
+            for i, item in enumerate(reward_scores)
+        ],
+        device=device,
+        dtype=dtype,
+    )
+    token_level_advantages, token_level_returns = _compute_group_relative_advantages_from_scores(
+        scores=token_level_scores,
+        response_mask=response_mask,
+        index=index,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        special_norm=special_norm,
+        active_mask=active_mask,
+    )
+
+    combined_advantages = trajectory_advantages + token_level_adv_beta * token_level_advantages
+    combined_returns = trajectory_returns + token_level_adv_beta * token_level_returns
+    return combined_advantages, combined_returns
 
 
 def update_ratios(

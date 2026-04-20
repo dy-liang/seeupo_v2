@@ -46,8 +46,8 @@ env_service:
   env_feedin_preference: code
 
 algorithm:
-  # 1. Token-level GRPO with QAPO step reward normalization
-  adv_estimator: grpo # grpo gae
+  # 1. QAPO advantage estimator
+  adv_estimator: qapo # qapo grpo gae
   use_kl_in_reward: False
 
   # 2. Not using GSPO sequence loss; comment out loss_mode / loss_agg_mode
@@ -65,7 +65,7 @@ algorithm:
 
   # 5. Advantages Normalization and QAPO reward shaping
   norm_adv_by_std_in_grpo: True
-  step_reward_normalization: qapo # none | qapo
+  token_level_adv_beta: 1.0
   # special_norm: True
 
 

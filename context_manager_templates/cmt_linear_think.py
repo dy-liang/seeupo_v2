@@ -252,20 +252,9 @@ class LinearThinkCMT(CMTLinear):
     def build_step_reward_scores(self, active_step: bool) -> dict:
         reward_scores = self.reward.model_dump()
         trajectory_length = max(len(self.grouped_steps), 1)
-        outcome = float(reward_scores["outcome"])
-        step_reward_normalization = self.config.algorithm.get("step_reward_normalization", "none")
-
-        if not active_step:
-            step_outcome = 0.0
-        elif step_reward_normalization == "qapo" and outcome > 0:
-            step_outcome = outcome / trajectory_length
-        else:
-            step_outcome = outcome
 
         reward_scores["trajectory_length"] = trajectory_length
         reward_scores["active_step"] = active_step
-        reward_scores["step_reward_normalization"] = step_reward_normalization
-        reward_scores["step_outcome"] = step_outcome
         return reward_scores
 
 
@@ -408,4 +397,3 @@ class LinearThinkCMT(CMTLinear):
         cmt_tokenized["response_position_ids"] = response_position_ids
 
         return cmt_tokenized
-

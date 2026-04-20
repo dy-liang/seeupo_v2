@@ -47,7 +47,7 @@ env_service:
 
 algorithm:
   # 1. Token-level GRPO
-  adv_estimator: grpo # grpo gae
+  adv_estimator: grpo # grpo qapo gae
   use_kl_in_reward: False
 
   # 2. Not using GSPO sequence loss; comment out loss_mode / loss_agg_mode
@@ -65,7 +65,7 @@ algorithm:
 
   # 5. Advantages Normalization (typical for GRPO baseline)
   norm_adv_by_std_in_grpo: True
-  step_reward_normalization: none # none | qapo
+  token_level_adv_beta: 0.0
   # special_norm: True
 
 

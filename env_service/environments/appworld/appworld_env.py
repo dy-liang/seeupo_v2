@@ -794,7 +794,7 @@ class AppworldEnv(BaseEnv):
 
         state_message = self.transition(action_msg)
 
-        is_terminated = self.world.task_completed()
+        is_terminated = self.world.task_completed() #确认 agent 在环境里是否显式调用了 complete_task(...)来声明结束任务
 
         reward = self.evaluate(params) if is_terminated else 0.0
 
@@ -815,6 +815,11 @@ class AppworldEnv(BaseEnv):
             and isinstance(params["sparse"], bool)
             and params["sparse"]
         )
+        return_details = (
+            "return_details" in params
+            and isinstance(params["return_details"], bool)
+            and params["return_details"]
+        )
 
         tracker = evaluate_task(
             task_id=self.task_id,
@@ -822,11 +827,20 @@ class AppworldEnv(BaseEnv):
             suppress_errors=True,
             save_report=False,
         )
-        num_passes = len(tracker.passes)
+        num_passes = len(tracker.passes) #这不是对step的通过数，而是对requirements的通过数
         num_failures = len(tracker.failures)
+        accuracy = float(num_failures == 0) if sparse else num_passes / (num_passes + num_failures)
+
+        if return_details:
+            return {
+                "accuracy": accuracy,
+                "num_passes": num_passes,
+                "num_failures": num_failures,
+            }
+
         if sparse:
             return float(num_failures == 0)
-        return num_passes / (num_passes + num_failures)
+        return accuracy
 
     def get_info(self,messages: Dict[str, Any] = None,
         params: Dict[str, Any] = None,):
