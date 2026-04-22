@@ -21,15 +21,15 @@ LOG_FILE="${PROJECT_ROOT}/appworld_service.log"
 
 echo "[1/2] Starting AppWorld env service (nohup) -> ${LOG_FILE}"
 
-nohup bash -c "
-    . \"${CONDA_SH}\"
-    conda init
-    conda activate \"${APPWORLD_CONDA_ENV}\"
-    cd \"${PROJECT_ROOT}/env_service/launch_script\"
-    exec bash appworld.sh
-" > "${LOG_FILE}" 2>&1 &
-echo "AppWorld env service PID: $!"
-sleep "${APPWORLD_STARTUP_SLEEP:-10}"
+# nohup bash -c "
+#     . \"${CONDA_SH}\"
+#     conda init
+#     conda activate \"${APPWORLD_CONDA_ENV}\"
+#     cd \"${PROJECT_ROOT}/env_service/launch_script\"
+#     exec bash appworld.sh
+# " > "${LOG_FILE}" 2>&1 &
+# echo "AppWorld env service PID: $!"
+# sleep "${APPWORLD_STARTUP_SLEEP:-10}"
 
 echo "[2/2] Starting training (launcher.py)..."
 . "${CONDA_SH}"

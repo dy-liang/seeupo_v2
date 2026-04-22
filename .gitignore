@@ -53,6 +53,7 @@ swanlog/
 *.zip
 wandb/
 experiments/
+launcher/qwen3_appworld/run-*
 # Django stuff:
 *.log
 

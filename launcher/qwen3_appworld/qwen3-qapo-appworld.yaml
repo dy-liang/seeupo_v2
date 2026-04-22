@@ -65,7 +65,7 @@ algorithm:
 
   # 5. Advantages Normalization and QAPO reward shaping
   norm_adv_by_std_in_grpo: True
-  token_level_adv_beta: 1.0
+  token_level_adv_beta: 0.0
   # special_norm: True
 
 
