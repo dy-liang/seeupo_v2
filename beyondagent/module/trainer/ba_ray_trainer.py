@@ -92,12 +92,11 @@ def _get_traj_length_normalized_outcome(reward_score: dict) -> float:
     if not reward_score.get("active_step", True):
         return 0.0
 
-    outcome = float(reward_score["outcome"])  # not success_rate
     success_rate = float(reward_score.get("success_rate", 0.0))
     trajectory_length = max(int(reward_score.get("trajectory_length", 1)), 1)
     if success_rate > 0:
-        return outcome / trajectory_length
-    return outcome
+        return 10.0 / trajectory_length
+    return 0.0
 
 def _get_token_length_normalized_outcome(reward_score: dict, response_token_length: float) -> float:
     if not reward_score.get("active_step", True):
@@ -144,6 +143,36 @@ def _summarize_numeric_series(prefix: str, values: list[int | float]) -> dict[st
                 f"{prefix}_min": float(np.min(values)),
             }
         )
+    return metrics
+
+
+def _summarize_advantage_tensor(
+    prefix: str,
+    advantage_tensor: torch.Tensor,
+    response_mask: torch.Tensor,
+    active_mask: Optional[torch.Tensor] = None,
+) -> dict[str, float]:
+    seq_lengths = response_mask.sum(dim=-1).clamp(min=1)
+    seq_values = advantage_tensor.sum(dim=-1) / seq_lengths
+    if active_mask is not None:
+        active_mask = active_mask.to(device=seq_values.device, dtype=torch.bool)
+        seq_values = seq_values[active_mask]
+    seq_values_list = seq_values.detach().float().cpu().tolist()
+    return _summarize_numeric_series(prefix, seq_values_list)
+
+
+def _compute_group_full_success_metrics(index: np.ndarray, reward_scores: np.ndarray) -> dict[str, float]:
+    group_success_counts = defaultdict(int)
+    for i, reward_score in enumerate(reward_scores):
+        if not reward_score.get("active_step", True):
+            continue
+        group_success_counts[index[i]] += int(float(reward_score.get("success_rate", 0.0)) > 0)
+
+    success_counts = list(group_success_counts.values())
+    metrics = {
+        "qapo/group_full_success_gt2_count": float(sum(count > 2 for count in success_counts)),
+    }
+    metrics.update(_summarize_numeric_series("qapo/group_full_success_count", success_counts))
     return metrics
 
 
@@ -560,17 +589,20 @@ def compute_advantage(
         response_length = qapo_calculation_mask.size(1)
         qapo_calculation_mask = data.batch["loss_mask"][:, -response_length:]
         response_token_lengths = qapo_calculation_mask.sum(dim=-1).clamp(min=1)
-        advantages, returns = compute_qapo_outcome_advantage(
+        advantages, returns, qapo_metrics = compute_qapo_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
             response_mask=qapo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             reward_scores=data.non_tensor_batch["reward_scores"],
             response_token_lengths=response_token_lengths,
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
             special_norm=special_norm,
+            step_level_adv_alpha=config.get("step_level_adv_alpha", 1.0) if config is not None else 1.0,
             token_level_adv_beta=config.get("token_level_adv_beta", 0.0) if config is not None else 0.0,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+        data.meta_info["qapo_metrics"] = qapo_metrics
     else:
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
@@ -659,6 +691,7 @@ def compute_grpo_outcome_advantage_local(
 
 
 def compute_qapo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     reward_scores: np.ndarray,
@@ -666,9 +699,10 @@ def compute_qapo_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     special_norm: bool = False,
+    step_level_adv_alpha: float = 1.0,
     token_level_adv_beta: float = 0.0,
     config: Optional[AlgoConfig] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     device = response_mask.device
     dtype = torch.float32
 
@@ -676,6 +710,15 @@ def compute_qapo_outcome_advantage(
         [item.get("active_step", True) for item in reward_scores],
         device=device,
         dtype=torch.bool,
+    )
+
+    base_advantages, base_returns = compute_grpo_outcome_advantage_local(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        special_norm=special_norm,
+        reward_scores=reward_scores,
     )
 
     trajectory_scores = torch.tensor(
@@ -692,9 +735,6 @@ def compute_qapo_outcome_advantage(
         special_norm=special_norm,
         active_mask=active_mask,
     )
-
-    if token_level_adv_beta == 0.0:
-        return trajectory_advantages, trajectory_returns
 
     token_level_scores = torch.tensor(
         [
@@ -717,9 +757,29 @@ def compute_qapo_outcome_advantage(
         active_mask=active_mask,
     )
 
-    combined_advantages = trajectory_advantages + token_level_adv_beta * token_level_advantages
-    combined_returns = trajectory_returns + token_level_adv_beta * token_level_returns
-    return combined_advantages, combined_returns
+    qapo_metrics = {}
+    qapo_metrics.update(
+        _summarize_advantage_tensor("qapo/base_adv", base_advantages, response_mask, active_mask)
+    )
+    qapo_metrics.update(
+        _summarize_advantage_tensor("qapo/step_adv", trajectory_advantages, response_mask, active_mask)
+    )
+    qapo_metrics.update(
+        _summarize_advantage_tensor("qapo/token_adv", token_level_advantages, response_mask, active_mask)
+    )
+    qapo_metrics.update(_compute_group_full_success_metrics(index=index, reward_scores=reward_scores))
+
+    combined_advantages = (
+        base_advantages
+        + step_level_adv_alpha * trajectory_advantages
+        + token_level_adv_beta * token_level_advantages
+    )
+    combined_returns = (
+        base_returns
+        + step_level_adv_alpha * trajectory_returns
+        + token_level_adv_beta * token_level_returns
+    )
+    return combined_advantages, combined_returns, qapo_metrics
 
 
 def update_ratios(
@@ -1818,8 +1878,11 @@ class BeyondAgentRayPPOTrainer:
                                 config=self.config.algorithm,
                                 ratios=seeupo_ratios,
                             )
+                            qapo_metrics = batch.meta_info.pop("qapo_metrics", None)
+                            if qapo_metrics:
+                                metrics.update(qapo_metrics)
 
-                            
+
 
 
                         # update critic

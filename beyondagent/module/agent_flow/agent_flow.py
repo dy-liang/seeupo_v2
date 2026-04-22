@@ -148,8 +148,9 @@ class AgentFlow(BaseAgentFlow):
             }
         if score >= 1:
             if self.config.actor_rollout_ref.rollout.magnify_success:
-                success_bonus = 10.0 if self.config.algorithm.adv_estimator == "qapo" else 1.0
-                score = success_bonus + score * 0.5
+                #success_bonus = 10.0 if self.config.algorithm.adv_estimator == "qapo" else 1.0
+                #score = success_bonus + score * 0.5
+                score = 1.0 + score * 0.5
             success_rate = 1.0
         else:
             if self.config.actor_rollout_ref.rollout.magnify_success:

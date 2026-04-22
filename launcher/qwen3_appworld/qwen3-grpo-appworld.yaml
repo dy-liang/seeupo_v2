@@ -65,6 +65,7 @@ algorithm:
 
   # 5. Advantages Normalization (typical for GRPO baseline)
   norm_adv_by_std_in_grpo: True
+  step_level_adv_alpha: 1.0
   token_level_adv_beta: 0.0
   # special_norm: True
 
